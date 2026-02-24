@@ -36,7 +36,6 @@ import (
 const (
 	secretValue       = "*****"
 	icmpFunnelTimeout = time.Second * 10
-	fedRampRegion     = "fed" // const string denoting the region used to connect to FEDRamp servers
 )
 
 var (
@@ -110,13 +109,6 @@ func isSecretEnvVar(key string) bool {
 		}
 	}
 	return false
-}
-
-func dnsProxyStandAlone(c *cli.Context, namedTunnel *connection.TunnelProperties) bool {
-	return c.IsSet(flags.ProxyDns) &&
-		!(c.IsSet(flags.Name) || // adhoc-named tunnel
-			c.IsSet(ingress.HelloWorldFlag) || // quick or named tunnel
-			namedTunnel != nil) // named tunnel
 }
 
 func prepareTunnelConfig(

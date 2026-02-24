@@ -25,7 +25,7 @@ class TestManagement:
         # Skipping this test for windows for now and will address it as part of tun-7377
         if platform.system() == "Windows":
             return
-        config = component_tests_config(cfd_mode=CfdModes.NAMED, run_proxy_dns=False, provide_ingress=False)
+        config = component_tests_config(cfd_mode=CfdModes.NAMED, provide_ingress=False)
         LOGGER.debug(config)
         headers = {}
         headers["Content-Type"] = "application/json"
@@ -52,7 +52,7 @@ class TestManagement:
         # Skipping this test for windows for now and will address it as part of tun-7377
         if platform.system() == "Windows":
             return
-        config = component_tests_config(cfd_mode=CfdModes.NAMED, run_proxy_dns=False, provide_ingress=False)
+        config = component_tests_config(cfd_mode=CfdModes.NAMED, provide_ingress=False)
         LOGGER.debug(config)
         config_path = write_config(tmp_path, config.full_config)
         with start_cloudflared(tmp_path, config, cfd_pre_args=["tunnel", "--ha-connections", "1"], new_process=True):
@@ -73,7 +73,7 @@ class TestManagement:
         # Skipping this test for windows for now and will address it as part of tun-7377
         if platform.system() == "Windows":
             return
-        config = component_tests_config(cfd_mode=CfdModes.NAMED, run_proxy_dns=False, provide_ingress=False)
+        config = component_tests_config(cfd_mode=CfdModes.NAMED, provide_ingress=False)
         LOGGER.debug(config)
         config_path = write_config(tmp_path, config.full_config)
         with start_cloudflared(tmp_path, config, cfd_pre_args=["tunnel", "--ha-connections", "1"], new_process=True):
@@ -94,7 +94,7 @@ class TestManagement:
         # Skipping this test for windows for now and will address it as part of tun-7377
         if platform.system() == "Windows":
             return
-        config = component_tests_config(cfd_mode=CfdModes.NAMED, run_proxy_dns=False, provide_ingress=False)
+        config = component_tests_config(cfd_mode=CfdModes.NAMED, provide_ingress=False)
         LOGGER.debug(config)
         config_path = write_config(tmp_path, config.full_config)
         with start_cloudflared(tmp_path, config, cfd_pre_args=["tunnel", "--ha-connections", "1", "--management-diagnostics=false"], new_process=True):
@@ -107,7 +107,13 @@ class TestManagement:
             assert resp.status_code == 404, "Expected cloudflared to return 404 for /metrics"
 
 
+
+
 @retry(stop_max_attempt_number=MAX_RETRIES, wait_fixed=BACKOFF_SECS * 1000)
 def send_request(url, headers={}):
     with requests.Session() as s:
-        return s.get(url, timeout=BACKOFF_SECS, headers=headers)
+        resp = s.get(url, timeout=BACKOFF_SECS, headers=headers)
+        if resp.status_code == 530:
+            LOGGER.debug(f"Received 530 status, retrying request to {url}")
+            raise Exception(f"Received 530 status code from {url}")
+        return resp

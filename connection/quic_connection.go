@@ -3,6 +3,7 @@ package connection
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/quic-go/quic-go"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
@@ -33,6 +33,8 @@ const (
 	HTTPMethodKey = "HttpMethod"
 	// HTTPHostKey is used to get or set http host in QUIC ALPN if the underlying proxy connection type is HTTP.
 	HTTPHostKey = "HttpHost"
+	// HTTPStatus is used to return http status code in QUIC ALPN if the underlying proxy connection type is HTTP.
+	HTTPStatus = "HttpStatus"
 
 	QUICMetadataFlowID = "FlowID"
 )
@@ -65,7 +67,7 @@ func NewTunnelConnection(
 	streamWriteTimeout time.Duration,
 	gracePeriod time.Duration,
 	logger *zerolog.Logger,
-) (TunnelConnection, error) {
+) TunnelConnection {
 	return &quicConnection{
 		conn:                 conn,
 		logger:               logger,
@@ -77,10 +79,11 @@ func NewTunnelConnection(
 		rpcTimeout:           rpcTimeout,
 		streamWriteTimeout:   streamWriteTimeout,
 		gracePeriod:          gracePeriod,
-	}, nil
+	}
 }
 
 // Serve starts a QUIC connection that begins accepting streams.
+// Returning a nil error means cloudflared will exit for good and will not attempt to reconnect.
 func (q *quicConnection) Serve(ctx context.Context) error {
 	// The edge assumes the first stream is used for the control plane
 	controlStream, err := q.conn.OpenStream()
@@ -88,16 +91,16 @@ func (q *quicConnection) Serve(ctx context.Context) error {
 		return fmt.Errorf("failed to open a registration control stream: %w", err)
 	}
 
-	// If either goroutine returns nil error, we rely on this cancellation to make sure the other goroutine exits
-	// as fast as possible as well. Nil error means we want to exit for good (caller code won't retry serving this
-	// connection).
 	// If either goroutine returns a non nil error, then the error group cancels the context, thus also canceling the
-	// other goroutine as fast as possible.
-	ctx, cancel := context.WithCancel(ctx)
+	// other goroutines. We enforce returning a not-nil error for each function started in the errgroup by logging
+	// the error returned and returning a custom error type instead.
 	errGroup, ctx := errgroup.WithContext(ctx)
 
-	// In the future, if cloudflared can autonomously push traffic to the edge, we have to make sure the control
-	// stream is already fully registered before the other goroutines can proceed.
+	// Close the quic connection if any of the following routines return from the errgroup (regardless of their error)
+	// because they are no longer processing requests for the connection.
+	defer q.Close()
+
+	// Start the control stream routine
 	errGroup.Go(func() error {
 		// err is equal to nil if we exit due to unregistration. If that happens we want to wait the full
 		// amount of the grace period, allowing requests to finish before we cancel the context, which will
@@ -114,16 +117,26 @@ func (q *quicConnection) Serve(ctx context.Context) error {
 				}
 			}
 		}
-		cancel()
-		return err
+		if err != nil {
+			q.logger.Error().Err(err).Msg("failed to serve the control stream")
+		}
+		return &ControlStreamError{}
 	})
+	// Start the accept stream loop routine
 	errGroup.Go(func() error {
-		defer cancel()
-		return q.acceptStream(ctx)
+		err := q.acceptStream(ctx)
+		if err != nil {
+			q.logger.Error().Err(err).Msg("failed to accept incoming stream requests")
+		}
+		return &StreamListenerError{}
 	})
+	// Start the datagram handler routine
 	errGroup.Go(func() error {
-		defer cancel()
-		return q.datagramHandler.Serve(ctx)
+		err := q.datagramHandler.Serve(ctx)
+		if err != nil {
+			q.logger.Error().Err(err).Msg("failed to run the datagram handler")
+		}
+		return &DatagramManagerError{}
 	})
 
 	return errGroup.Wait()
@@ -140,7 +153,6 @@ func (q *quicConnection) Close() {
 }
 
 func (q *quicConnection) acceptStream(ctx context.Context) error {
-	defer q.Close()
 	for {
 		quicStream, err := q.conn.AcceptStream(ctx)
 		if err != nil {
@@ -230,7 +242,7 @@ func (q *quicConnection) dispatchRequest(ctx context.Context, stream *rpcquic.Re
 			ConnIndex: q.connIndex,
 		}), rwa.connectResponseSent
 	default:
-		return errors.Errorf("unsupported error type: %s", request.Type), false
+		return fmt.Errorf("unsupported error type: %s", request.Type), false
 	}
 }
 
@@ -277,7 +289,7 @@ func (hrw *httpResponseAdapter) AddTrailer(trailerName, trailerValue string) {
 
 func (hrw *httpResponseAdapter) WriteRespHeaders(status int, header http.Header) error {
 	metadata := make([]pogs.Metadata, 0)
-	metadata = append(metadata, pogs.Metadata{Key: "HttpStatus", Val: strconv.Itoa(status)})
+	metadata = append(metadata, pogs.Metadata{Key: HTTPStatus, Val: strconv.Itoa(status)})
 	for k, vv := range header {
 		for _, v := range vv {
 			httpHeaderKey := fmt.Sprintf("%s:%s", HTTPHeaderKey, k)
@@ -317,7 +329,7 @@ func (hrw *httpResponseAdapter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 func (hrw *httpResponseAdapter) WriteErrorResponse(err error) {
-	_ = hrw.WriteConnectResponseData(err, pogs.Metadata{Key: "HttpStatus", Val: strconv.Itoa(http.StatusBadGateway)})
+	_ = hrw.WriteConnectResponseData(err, pogs.Metadata{Key: HTTPStatus, Val: strconv.Itoa(http.StatusBadGateway)})
 }
 
 func (hrw *httpResponseAdapter) WriteConnectResponseData(respErr error, metadata ...pogs.Metadata) error {
