@@ -159,6 +159,10 @@ container:
 generate-docker-version:
 	echo latest $(VERSION) > versions
 
+.PHONY: generate-internal-image-version
+generate-internal-image-version:
+	echo $(VERSION) > versions-internal
+
 
 .PHONY: test
 test: vet
@@ -289,3 +293,9 @@ ci-test: fmt-check lint test
 .PHONY: ci-fips-test
 ci-fips-test:
 	@FIPS=true $(MAKE) ci-test
+
+.PHONY: install-hooks
+install-hooks:
+	git config core.hooksPath .githooks
+	@echo "Git hooks installed from .githooks/"
+	@echo "Pre-push hook will run: make fmt-check lint test"

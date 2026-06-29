@@ -41,7 +41,7 @@ const (
 
 // quicConnection represents the type that facilitates Proxying via QUIC streams.
 type quicConnection struct {
-	conn                 quic.Connection
+	conn                 cfdquic.QUICConnection
 	logger               *zerolog.Logger
 	orchestrator         Orchestrator
 	datagramHandler      DatagramSessionHandler
@@ -54,10 +54,10 @@ type quicConnection struct {
 	gracePeriod        time.Duration
 }
 
-// NewTunnelConnection takes a [quic.Connection] to wrap it for use with cloudflared application logic.
+// NewTunnelConnection takes a [cfdquic.QUICConnection] to wrap it for use with cloudflared application logic.
 func NewTunnelConnection(
 	ctx context.Context,
-	conn quic.Connection,
+	conn cfdquic.QUICConnection,
 	connIndex uint8,
 	orchestrator Orchestrator,
 	datagramSessionHandler DatagramSessionHandler,
@@ -143,7 +143,7 @@ func (q *quicConnection) Serve(ctx context.Context) error {
 }
 
 // serveControlStream will serve the RPC; blocking until the control plane is done.
-func (q *quicConnection) serveControlStream(ctx context.Context, controlStream quic.Stream) error {
+func (q *quicConnection) serveControlStream(ctx context.Context, controlStream *quic.Stream) error {
 	return q.controlStreamHandler.ServeControlStream(ctx, controlStream, q.connOptions.ConnectionOptions(), q.orchestrator)
 }
 
@@ -166,10 +166,10 @@ func (q *quicConnection) acceptStream(ctx context.Context) error {
 	}
 }
 
-func (q *quicConnection) runStream(quicStream quic.Stream) {
+func (q *quicConnection) runStream(quicStream *quic.Stream) {
 	ctx := quicStream.Context()
 	stream := cfdquic.NewSafeStreamCloser(quicStream, q.streamWriteTimeout, q.logger)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	// we are going to fuse readers/writers from stream <- cloudflared -> origin, and we want to guarantee that
 	// code executed in the code path of handleStream don't trigger an earlier close to the downstream write stream.
