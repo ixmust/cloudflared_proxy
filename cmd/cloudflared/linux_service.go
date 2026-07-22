@@ -61,12 +61,14 @@ const (
 	serviceConfigFile        = "config.yml"
 	serviceCredentialFile    = "cert.pem"
 	serviceConfigPath        = serviceConfigDir + "/" + serviceConfigFile
-	tokenPath                = serviceConfigDir + "/" + defaultTokenFile
 	cloudflaredService       = "cloudflared.service"
 	cloudflaredUpdateService = "cloudflared-update.service"
 	cloudflaredUpdateTimer   = "cloudflared-update.timer"
 	cloudflaredOpenRCService = "cloudflared"
 )
+
+// OS-specific function for token file creation
+var createTokenFile = createTokenFileUnix
 
 var systemdAllTemplates = map[string]ServiceTemplate{
 	cloudflaredService: {
@@ -260,12 +262,6 @@ func installLinuxService(c *cli.Context) error {
 		Path: etPath,
 	}
 
-	// Both installation methods below need the config directory to be present,
-	// either to hold the token file, or the configuration yaml
-	if err := ensureConfigDirExists(serviceConfigDir); err != nil {
-		return err
-	}
-
 	var extraArgs []string
 	if c.NArg() == 0 {
 		// If passed no arguments e.g., "$ cloudflared service install",
@@ -283,15 +279,15 @@ func installLinuxService(c *cli.Context) error {
 		// Ensure token file is removed if install fails
 		defer func() {
 			if err != nil {
-				removeTokenFile(tokenPath, log)
+				removeTokenFile(serviceConfigDir, log)
 			}
 		}()
 
-		if err = writeTokenToFile(tokenPath, c.Args().First()); err != nil {
-			return err
+		if err = writeTokenToConfigDir(c, serviceConfigDir); err != nil {
+			return fmt.Errorf("could not write token to configuration directory: %w", err)
 		}
 
-		extraArgs = buildArgsForTokenFile(tokenPath)
+		extraArgs = buildArgsForTokenFile(serviceConfigDir)
 	}
 
 	templateArgs.ExtraArgs = extraArgs
@@ -318,6 +314,10 @@ func installLinuxService(c *cli.Context) error {
 }
 
 func buildArgsForConfig(c *cli.Context, log *zerolog.Logger) ([]string, error) {
+	if err := ensureConfigDirExists(serviceConfigDir); err != nil {
+		return nil, err
+	}
+
 	src, _, err := config.ReadConfigFile(c, log)
 	if err != nil {
 		return nil, err
@@ -455,11 +455,11 @@ func uninstallLinuxService(c *cli.Context) error {
 		err = uninstallSysv(log)
 	}
 
+	removeTokenFile(serviceConfigDir, log)
+
 	if err == nil {
 		log.Info().Msg("Linux service for cloudflared uninstalled successfully")
 	}
-
-	removeTokenFile(tokenPath, log)
 
 	return err
 }
@@ -549,14 +549,6 @@ func uninstallOpenRC(log *zerolog.Logger) error {
 		}
 	}
 	return nil
-}
-
-func ensureConfigDirExists(configDir string) error {
-	ok, err := config.FileExists(configDir)
-	if !ok && err == nil {
-		err = os.Mkdir(configDir, 0o755) //nolint:gosec // config dir must be traversable by a non-root service user
-	}
-	return err
 }
 
 func copyFile(src, dest string) error {

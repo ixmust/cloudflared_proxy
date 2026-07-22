@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
@@ -13,61 +14,84 @@ import (
 )
 
 const (
-	defaultTokenFile             = "token"
-	tokenPerms       os.FileMode = 0o600
+	defaultTokenFile = "token"
 )
 
-func writeTokenToFile(path string, token string) error {
-	if _, err := tunnel.ParseToken(token); err != nil {
-		return cliutil.UsageError("Provided tunnel token is not valid (%s).", err)
+func ensureConfigDirExists(configDir string) error {
+	if err := os.Mkdir(configDir, 0o755); err != nil { //nolint:gosec // config dir must be traversable by non-root user
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return fmt.Errorf("create config dir at %s: %w", configDir, err)
 	}
+	return nil
+}
 
-	if err := os.WriteFile(path, []byte(token), tokenPerms); err != nil {
-		return fmt.Errorf("failed to write token to %s: %v", path, err)
+func createTokenFileUnix(path string) error {
+	const tokenPerms os.FileMode = 0o600
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, tokenPerms) //nolint:gosec // All callers of this function construct path from constant strings or well-known env vars (e.g., $HOME)
+	if err != nil {
+		return fmt.Errorf("create token file at %s: %w", path, err)
 	}
+	defer func() { _ = f.Close() }()
 
-	// If the token file already existed with unrestrictive perms, os.WriteFile
-	// above will not update them
+	// If the file already existed with unrestrictive permissions, os.OpenFile
+	// will not update its permissions, so perform an extra os.Chmod
 	if err := os.Chmod(path, tokenPerms); err != nil {
-		return fmt.Errorf("failed to restrict permissions on token file %s: %v", path, err)
+		return fmt.Errorf("chmod token file at %s: %w", path, err)
 	}
 
 	return nil
 }
 
-func removeTokenFile(tokenPath string, log *zerolog.Logger) {
-	err := os.Remove(tokenPath)
+// Write out the token file to the configuration directory with the correct
+// permissions. Since the method used to restrict the permissions is platform
+// dependent, make the function used to restrict the permissions an injectable
+// dependency
+func writeTokenToFile(path string, token string) error {
+	if _, err := tunnel.ParseToken(token); err != nil {
+		return cliutil.UsageError("Provided tunnel token is not valid (%s).", err)
+	}
+
+	if err := createTokenFile(path); err != nil {
+		return fmt.Errorf("create token file at %s: %w", path, err)
+	}
+
+	// Won't update permissions as file already exists
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		return fmt.Errorf("write token to %s: %w", path, err)
+	}
+
+	return nil
+}
+
+func removeTokenFile(configDir string, log *zerolog.Logger) {
+	tp := tokenPath(configDir)
+	err := os.Remove(tp)
 
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Warn().Msgf("Could not remove service token file at %s: %v", tokenPath, err)
+		log.Warn().Msgf("Could not remove service token file at %s: %v", tp, err)
 	}
 }
 
-func buildArgsForTokenFile(tokenPath string) []string {
+func buildArgsForTokenFile(configDir string) []string {
 	return []string{
-		"tunnel", "run", "--token-file", tokenPath,
+		"tunnel", "run", "--token-file", tokenPath(configDir),
 	}
 }
 
-// nolint:unused // This function is used by macos and Windows builds, the unused warning when building for Linux is spurious
-func buildArgsForToken(c *cli.Context, log *zerolog.Logger) ([]string, error) {
-	token := c.Args().First()
-	if _, err := tunnel.ParseToken(token); err != nil {
-		return nil, cliutil.UsageError("Provided tunnel token is not valid (%s).", err)
-	}
-
-	return []string{
-		"tunnel", "run", "--token", token,
-	}, nil
+func tokenPath(configDir string) string {
+	return filepath.Join(configDir, defaultTokenFile)
 }
 
-// nolint:unused // This function is used by macos and Windows builds, the unused warning when building for Linux is spurious
-func getServiceExtraArgsFromCliArgs(c *cli.Context, log *zerolog.Logger) ([]string, error) {
-	if c.NArg() > 0 {
-		// currently, we only support extra args for token
-		return buildArgsForToken(c, log)
-	} else {
-		// empty extra args
-		return make([]string, 0), nil
+func writeTokenToConfigDir(c *cli.Context, configDir string) error {
+	if err := ensureConfigDirExists(configDir); err != nil {
+		return err
 	}
+
+	if err := writeTokenToFile(tokenPath(configDir), c.Args().First()); err != nil {
+		return err
+	}
+
+	return nil
 }
